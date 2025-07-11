@@ -18,6 +18,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o main .
 FROM alpine:3.18
 RUN apk --no-cache add ca-certificates
 
+# ARG APP_VERSION, will be set during build by github actions
+ARG APP_VERSION=0.0.0
+LABEL app.version=$APP_VERSION
+
 # Set working directory in final image
 WORKDIR /app
 
