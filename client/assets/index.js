@@ -115,6 +115,7 @@ function convertSRTtoVTT(srtText) {
       .dispatchEvent(new Event("submit"));
   });
 
+  const form = document.querySelector("#torrent-form");
   const subtitleInput = document.getElementById('subtitle-upload-input');
   subtitleInput.addEventListener('change', function(event) {
       if (!player) return;
@@ -156,7 +157,6 @@ function convertSRTtoVTT(srtText) {
       subtitleInput.value = '';
   });
 
-  const form = document.querySelector("#torrent-form");
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const magnet = document.querySelector("#magnet").value;

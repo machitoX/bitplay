@@ -465,11 +465,6 @@ type FileLinkInfo struct {
 	Size int64  `json:"size"`
 }
 
-type RDResponse struct {
-	Source string         `json:"source"`
-	Files  []FileLinkInfo `json:"files"`
-}
-
 type FinalResponse struct {
 	Source    string         `json:"source"`
 	Videos    []FileLinkInfo `json:"videos"`
