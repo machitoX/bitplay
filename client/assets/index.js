@@ -12,6 +12,8 @@ let settings = {
   enableJackett: false,
   jackettHost: "",
   jackettApiKey: "",
+  enableRealDebrid: false,
+  realDebridApiKey: "",
 };
 
 const searchWrapper = document.querySelector("#search-wrapper");
@@ -52,6 +54,35 @@ function doubleTapFF(options) {
 }
 videojs.registerPlugin('doubleTapFF', doubleTapFF);
 
+const Button = videojs.getComponent('Button');
+const SubtitleButton = videojs.extend(Button, {
+  constructor: function(player, options) {
+    Button.apply(this, arguments);
+    this.addClass('vjs-icon-subtitles');
+    this.controlText('Upload Subtitles');
+  },
+  handleClick: function() {
+    document.getElementById('subtitle-upload-input').click();
+  }
+});
+videojs.registerComponent('SubtitleButton', SubtitleButton);
+
+function convertSRTtoVTT(srtText) {
+    let vttContent = "WEBVTT\n\n";
+    let lines = srtText.trim().replace(/\r/g, '').split('\n');
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes('-->')) {
+            vttContent += lines[i].replace(/,/g, '.') + '\n';
+        } else if (lines[i].trim() !== '' && isNaN(lines[i].trim())) {
+            vttContent += lines[i] + '\n';
+        } else if (lines[i].trim() === '') {
+            vttContent += '\n';
+        }
+    }
+    return vttContent;
+}
+
+
 (async function ($) {
   // toggle dark mode button
   const toggleDarkMode = () => {
@@ -85,6 +116,47 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
   });
 
   const form = document.querySelector("#torrent-form");
+  const subtitleInput = document.getElementById('subtitle-upload-input');
+  subtitleInput.addEventListener('change', function(event) {
+      if (!player) return;
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+          let content = e.target.result;
+          let mimeType = 'text/vtt';
+          if (file.name.toLowerCase().endsWith('.srt')) {
+              content = convertSRTtoVTT(content);
+          }
+
+          const blob = new Blob([content], { type: mimeType });
+          const url = URL.createObjectURL(blob);
+
+          const track = player.addRemoteTextTrack({
+              kind: 'subtitles',
+              label: file.name,
+              src: url,
+          }, false);
+
+          // Find the track and set it to showing
+          track.addEventListener('load', function() {
+              const tracks = player.textTracks();
+              for (let i = 0; i < tracks.length; i++) {
+                  // Find the newly added track and enable it
+                  if (tracks[i].label === file.name) {
+                      tracks[i].mode = 'showing';
+                      break;
+                  }
+              }
+          });
+      };
+      reader.readAsText(file);
+
+      // Reset input so the same file can be loaded again
+      subtitleInput.value = '';
+  });
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const magnet = document.querySelector("#magnet").value;
@@ -107,212 +179,202 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
       const vidElm = document.createElement("video");
       vidElm.setAttribute("id", "video-player");
       vidElm.setAttribute("class", "video-js mt-10 w-full");
-
       document.querySelector("main").appendChild(vidElm);
     }
 
-    form
-      .querySelector("button[type=submit]")
-      .setAttribute("disabled", "disabled");
-    form.querySelector("button[type=submit]").innerHTML = "";
-    form.querySelector("button[type=submit]").classList.add("loader");
+    const submitButton = form.querySelector("button[type=submit]");
+    submitButton.setAttribute("disabled", "disabled");
+    submitButton.innerHTML = "";
+    submitButton.classList.add("loader");
 
-    const res = await fetch("/api/v1/torrent/add", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ magnet }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json();
-      butterup.toast({
-        message: err.error || "Something went wrong",
-        location: "top-right",
-        icon: true,
-        dismissable: true,
-        type: "error",
+    try {
+      const res = await fetch("/api/v1/torrent/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ magnet }),
       });
-      form.querySelector("button[type=submit]").removeAttribute("disabled");
-      form.querySelector("button[type=submit]").innerHTML = "Play Now";
-      form.querySelector("button[type=submit]").classList.remove("loader");
-      searchResults.querySelectorAll("#play-torrent").forEach((el) => {
-        el.removeAttribute("disabled");
-        el.innerHTML = "Watch";
-        el.classList.remove("loader");
-      });
-      return;
-    }
 
-    const { sessionId } = await res.json();
-    const filesRes = await fetch("/api/v1/torrent/" + sessionId);
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to add torrent");
+      }
 
-    if (!filesRes.ok) {
-      const err = await filesRes.json();
-      butterup.toast({
-        message: err.error || "Something went wrong",
-        location: "top-right",
-        icon: true,
-        dismissable: true,
-        type: "error",
-      });
-      form.querySelector("button[type=submit]").removeAttribute("disabled");
-      form.querySelector("button[type=submit]").innerHTML = "Play Now";
-      form.querySelector("button[type=submit]").classList.remove("loader");
-      document.querySelectorAll("#play-torrent").forEach((el) => {
-        el.removeAttribute("disabled");
-        el.innerHTML = "Watch";
-        el.classList.remove("loader");
-      });
-      return;
-    }
+      const data = await res.json();
 
-    const files = await filesRes.json();
+      let videoSources = [];
+      let subtitleTracks = [];
 
-    // Find video file
-    const videoFiles = files.filter((f) =>
-      f.name.match(/\.(mp4|mkv|webm|avi)$/i)
-    );
-
-    if (!videoFiles.length) {
-      butterup.toast({
-        message: "No video file found",
-        location: "top-right",
-        icon: true,
-        dismissable: true,
-        type: "error",
-      });
-      form.querySelector("button[type=submit]").removeAttribute("disabled");
-      form.querySelector("button[type=submit]").innerHTML = "Play Now";
-      form.querySelector("button[type=submit]").classList.remove("loader");
-      document.querySelectorAll("#play-torrent").forEach((el) => {
-        el.removeAttribute("disabled");
-        el.innerHTML = "Watch";
-        el.classList.remove("loader");
-      });
-      return;
-    }
-
-    const subtitleFiles = files.filter((f) =>
-      f.name.match(/\.(srt|vtt|sub)$/i)
-    );
-
-    const videoUrls = videoFiles.map((file) => {
-      return {
-        src: "/api/v1/torrent/" + sessionId + "/stream/" + file.index,
-        title: file.name,
-        type: "video/mp4",
-      };
-    });
-
-    let subtitles = [];
-    if (subtitleFiles.length) {
-      subtitles = subtitleFiles.map((subFile) => {
-        let language = "en";
-        let langName = "English";
-
-        // Try to extract language code from filename
-        console.log(subFile.name);
-        const langMatch = subFile.name.match(/\.([a-z]{2,3})\.(srt|vtt|sub)$/i);
-        if (langMatch) {
-          language = langMatch[1];
-          langName = getLanguage(language);
+      if (data.source === 'realdebrid') {
+        if (!data.videos || data.videos.length === 0) {
+          throw new Error("No video files found in Real-Debrid response");
         }
 
-        return {
-          src:
-            "/api/v1/torrent/" +
-            sessionId +
-            "/stream/" +
-            subFile.index +
-            ".vtt?format=vtt",
-          srclang: language,
-          label: langName,
-          kind: "subtitles",
-          type: "vtt",
-        };
-      });
-    }
-    player = videojs(
-      "video-player",
-      {
-        fluid: true,
-        controls: true,
-        autoplay: true,
-        preload: "auto",
-        sources: [{
-          src: videoUrls[0].src,
-          type: videoUrls[0].type,
-          label: videoUrls[0].title,
-        }],
-        tracks: subtitles,
-        html5: {
-          nativeTextTracks: false
-        },
-        plugins: {
-          hotkeys: {
-            volumeStep: 0.1,
-            seekStep: 5,
-            enableModifiersForNumbers: false,
-            enableVolumeScroll: false,
+        videoSources = data.videos.map(v => ({
+            src: v.url,
+            title: v.name,
+            type: 'video/mp4' // Player will likely figure it out
+        }));
+
+        subtitleTracks = (data.subtitles || []).map(s => {
+            let language = 'en';
+            let langName = 'English';
+            const langMatch = s.name.match(/\.([a-z]{2,3})\.(srt|vtt|sub)$/i);
+            if (langMatch) {
+                language = langMatch[1];
+                langName = getLanguage(language);
+            }
+            return {
+                src: s.url,
+                srclang: language,
+                label: langName,
+                kind: 'subtitles',
+            };
+        });
+      } else {
+        const { sessionId } = data;
+        const filesRes = await fetch("/api/v1/torrent/" + sessionId);
+
+        if (!filesRes.ok) {
+          const err = await filesRes.json();
+          throw new Error(err.error || "Something went wrong fetching files");
+        }
+
+        const files = await filesRes.json();
+
+        const allVideoFiles = files.filter(f => f.name.match(/\.(mp4|mkv|webm|avi)$/i));
+        if (allVideoFiles.length === 0) {
+          throw new Error("No video file found in torrent");
+        }
+
+        videoSources = allVideoFiles.map(file => ({
+            src: "/api/v1/torrent/" + sessionId + "/stream/" + file.index,
+            title: file.name,
+            type: "video/mp4",
+        }));
+
+        const allSubtitleFiles = files.filter(f => f.name.match(/\.(srt|vtt|sub)$/i));
+        subtitleTracks = allSubtitleFiles.map(subFile => {
+            let language = "en";
+            let langName = "English";
+            const langMatch = subFile.name.match(/\.([a-z]{2,3})\.(srt|vtt|sub)$/i);
+            if (langMatch) {
+                language = langMatch[1];
+                langName = getLanguage(language);
+            }
+            return {
+                src: "/api/v1/torrent/" + sessionId + "/stream/" + subFile.index + ".vtt?format=vtt",
+                srclang: language,
+                label: langName,
+                kind: "subtitles",
+                type: "vtt",
+            };
+        });
+      }
+
+      // Initialize player
+      player = videojs(
+        "video-player",
+        {
+          fluid: true,
+          controls: true,
+          autoplay: true,
+          preload: "auto",
+          sources: [{
+            src: videoSources[0].src,
+            type: videoSources[0].type,
+            label: videoSources[0].title,
+          }],
+          tracks: subtitleTracks,
+          html5: {
+            nativeTextTracks: false
+          },
+          controlBar: {
+            children: [
+                'playToggle',
+                'volumePanel',
+                'currentTimeDisplay',
+                'timeDivider',
+                'durationDisplay',
+                'progressControl',
+                'liveDisplay',
+                'remainingTimeDisplay',
+                'customControlSpacer',
+                'playbackRateMenuButton',
+                'chaptersButton',
+                'descriptionsButton',
+                'subtitlesButton',
+                'captionsButton',
+                'audioTrackButton',
+                'SubtitleButton', // Custom button
+                'fullscreenToggle'
+            ]
+          },
+          plugins: {
+            hotkeys: {
+              volumeStep: 0.1,
+              seekStep: 5,
+              enableModifiersForNumbers: false,
+              enableVolumeScroll: false,
+            },
           },
         },
-      },
-      function () {
-        player = this;
-        player.on("error", (e) => {
-          console.error(e);
-          butterup.toast({
-            message: "Something went wrong",
-            location: "top-right",
-            icon: true,
-            dismissable: true,
-            type: "error",
+        function () {
+          player = this;
+          player.on("error", (e) => {
+            console.error(e);
+            butterup.toast({
+              message: "Video player error",
+              location: "top-right",
+              icon: true,
+              dismissable: true,
+              type: "error",
+            });
           });
-        });
-      }
-    );
-    player.doubleTapFF();
+        }
+      );
+      player.doubleTapFF();
 
-    document.querySelector("#video-player").style.display = "block";
-    // scroll to video player
-    setTimeout(() => {
-      window.scrollTo({
-        top: document.body.scrollHeight,
-        behavior: "smooth",
+      document.querySelector("#video-player").style.display = "block";
+      setTimeout(() => {
+        window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+
+        if (videoSources.length > 1) {
+          const videoSelect = document.createElement("select");
+          videoSelect.id = "video-select";
+          videoSelect.className = "video-select";
+          videoSources.forEach((video) => {
+            const option = document.createElement("option");
+            option.value = video.src;
+            option.innerHTML = video.title;
+            videoSelect.appendChild(option);
+          });
+          videoSelect.addEventListener("change", (e) => {
+            player.src({ src: e.target.value, type: 'video/mp4' });
+            player.play();
+          });
+          document.querySelector("#video-player").appendChild(videoSelect);
+        }
+        player.play();
+      }, 300);
+
+    } catch (error) {
+      butterup.toast({
+        message: error.message || "An unexpected error occurred",
+        location: "top-right",
+        icon: true,
+        dismissable: true,
+        type: "error",
       });
-
-      if (videoUrls.length > 1) {
-        const videoSelect = document.createElement("select");
-        videoSelect.setAttribute("id", "video-select");
-        videoSelect.setAttribute("class", "video-select");
-        videoSelect.setAttribute("aria-label", "Select video");
-        videoUrls.forEach((video) => {
-          const option = document.createElement("option");
-          option.setAttribute("value", video.src);
-          option.innerHTML = video.title;
-          videoSelect.appendChild(option);
-        });
-        videoSelect.addEventListener("change", (e) => {
-          const selectedSrc = e.target.value;
-          player.src({
-            src: selectedSrc,
-            type: "video/mp4",
-          });
-          player.play();
-        });
-        document.querySelector("#video-player").appendChild(videoSelect);
-      }
-      player.play()
-    }, 300);
-
-    form.querySelector("button[type=submit]").removeAttribute("disabled");
-    form.querySelector("button[type=submit]").innerHTML = "Play Now";
-    form.querySelector("button[type=submit]").classList.remove("loader");
-    document.querySelectorAll("#play-torrent").forEach((el) => {
-      el.removeAttribute("disabled");
-      el.innerHTML = "Watch";
-      el.classList.remove("loader");
-    });
+    } finally {
+      submitButton.removeAttribute("disabled");
+      submitButton.innerHTML = "Play Now";
+      submitButton.classList.remove("loader");
+      document.querySelectorAll("#play-torrent").forEach((el) => {
+        el.removeAttribute("disabled");
+        el.innerHTML = "Watch";
+        el.classList.remove("loader");
+      });
+    }
   });
 
   // create switch button
@@ -1031,6 +1093,69 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
     }
   });
 
+  document
+    .querySelector("#realdebrid-settings-form")
+    .addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const enableRealDebrid = e.target.querySelector("#enableRealDebrid").checked;
+      const realDebridApiKey = e.target.querySelector("#realDebridApiKey").value;
+      const submitButton = e.target.querySelector("button[type=submit]");
+
+      submitButton.setAttribute("disabled", "disabled");
+      submitButton.classList.add("loader");
+      submitButton.innerHTML = "Saving...";
+
+      const body = {
+        enableRealDebrid,
+        realDebridApiKey,
+      };
+
+      const response = await fetch("/api/v1/settings/realdebrid", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        butterup.toast({
+          message: data.error || "Failed to save settings",
+          location: "top-right",
+          icon: true,
+          dismissable: true,
+          type: "error",
+        });
+      } else {
+        butterup.toast({
+          message: "Real-Debrid settings saved successfully",
+          location: "top-right",
+          icon: true,
+          dismissable: true,
+          type: "success",
+        });
+
+        settings = {
+          ...settings,
+          enableRealDebrid: body.enableRealDebrid,
+          realDebridApiKey: body.realDebridApiKey,
+        };
+      }
+
+      submitButton.removeAttribute("disabled");
+      submitButton.classList.remove("loader");
+      submitButton.innerHTML = "Save Settings";
+    });
+
+  document.querySelector("#test-realdebrid").addEventListener("click", (e) => {
+    butterup.toast({
+      message: "Test connection for Real-Debrid is not implemented yet.",
+      location: "top-right",
+      icon: true,
+      dismissable: true,
+      type: "info",
+    });
+  });
+
   // fetch settings
   fetch("/api/v1/settings")
     .then((res) => {
@@ -1052,6 +1177,8 @@ videojs.registerPlugin('doubleTapFF', doubleTapFF);
         data.enableJackett || false;
       document.querySelector("#jackettHost").value = data.jackettHost || "";
       document.querySelector("#jackettApiKey").value = data.jackettApiKey || "";
+      document.querySelector("#enableRealDebrid").checked = data.enableRealDebrid || false;
+      document.querySelector("#realDebridApiKey").value = data.realDebridApiKey || "";
 
       // Set switch button state
       const switchInputs = document.querySelectorAll("#switchInput");

@@ -41,14 +41,16 @@ type TorrentSession struct {
 }
 
 type Settings struct {
-	EnableProxy    bool   `json:"enableProxy"`
-	ProxyURL       string `json:"proxyUrl"`
-	EnableProwlarr bool   `json:"enableProwlarr"`
-	ProwlarrHost   string `json:"prowlarrHost"`
-	ProwlarrApiKey string `json:"prowlarrApiKey"`
-	EnableJackett  bool   `json:"enableJackett"`
-	JackettHost    string `json:"jackettHost"`
-	JackettApiKey  string `json:"jackettApiKey"`
+	EnableProxy      bool   `json:"enableProxy"`
+	ProxyURL         string `json:"proxyUrl"`
+	EnableProwlarr   bool   `json:"enableProwlarr"`
+	ProwlarrHost     string `json:"prowlarrHost"`
+	ProwlarrApiKey   string `json:"prowlarrApiKey"`
+	EnableJackett    bool   `json:"enableJackett"`
+	JackettHost      string `json:"jackettHost"`
+	JackettApiKey    string `json:"jackettApiKey"`
+	EnableRealDebrid bool   `json:"enableRealDebrid"`
+	RealDebridApiKey string `json:"realDebridApiKey"`
 }
 
 type ProxySettings struct {
@@ -66,6 +68,11 @@ type JackettSettings struct {
 	EnableJackett bool   `json:"enableJackett"`
 	JackettHost   string `json:"jackettHost"`
 	JackettApiKey string `json:"jackettApiKey"`
+}
+
+type RealDebridSettings struct {
+	EnableRealDebrid bool   `json:"enableRealDebrid"`
+	RealDebridApiKey string `json:"realDebridApiKey"`
 }
 
 var (
@@ -270,14 +277,16 @@ func init() {
 	if _, err := os.Stat("config/settings.json"); os.IsNotExist(err) {
 		log.Println("settings.json not found, creating default settings")
 		defaultSettings := Settings{
-			EnableProxy:    false,
-			ProxyURL:       "",
-			EnableProwlarr: false,
-			ProwlarrHost:   "",
-			ProwlarrApiKey: "",
-			EnableJackett:  false,
-			JackettHost:    "",
-			JackettApiKey:  "",
+			EnableProxy:      false,
+			ProxyURL:         "",
+			EnableProwlarr:   false,
+			ProwlarrHost:     "",
+			ProwlarrApiKey:   "",
+			EnableJackett:    false,
+			JackettHost:      "",
+			JackettApiKey:    "",
+			EnableRealDebrid: false,
+			RealDebridApiKey: "",
 		}
 		// Create the config directory if it doesn't exist
 		if err := os.MkdirAll("config", 0755); err != nil {
@@ -335,6 +344,7 @@ func main() {
 	http.HandleFunc("/api/v1/settings/proxy", saveProxySettingsHandler)
 	http.HandleFunc("/api/v1/settings/prowlarr", saveProwlarrSettingsHandler)
 	http.HandleFunc("/api/v1/settings/jackett", saveJackettSettingsHandler)
+	http.HandleFunc("/api/v1/settings/realdebrid", saveRealDebridSettingsHandler)
 	http.HandleFunc("/api/v1/prowlarr/search", searchFromProwlarr)
 	http.HandleFunc("/api/v1/jackett/search", searchFromJackett)
 	http.HandleFunc("/api/v1/prowlarr/test", testProwlarrConnection)
@@ -427,6 +437,40 @@ func setGlobalProxy() {
 	}
 }
 
+type RDAddMagnetResponse struct {
+	ID  string `json:"id"`
+	URI string `json:"uri"`
+}
+
+type RDTorrentInfo struct {
+	ID       string   `json:"id"`
+	Filename string   `json:"filename"`
+	Bytes    int64    `json:"bytes"`
+	Status   string   `json:"status"`
+	Files    []RDFile `json:"files"`
+	Links    []string `json:"links"`
+	Progress int      `json:"progress"`
+}
+
+type RDFile struct {
+	ID       int    `json:"id"`
+	Path     string `json:"path"`
+	Bytes    int64  `json:"bytes"`
+	Selected int    `json:"selected"`
+}
+
+type FileLinkInfo struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+	Size int64  `json:"size"`
+}
+
+type FinalResponse struct {
+	Source    string         `json:"source"`
+	Videos    []FileLinkInfo `json:"videos"`
+	Subtitles []FileLinkInfo `json:"subtitles"`
+}
+
 // Handler to add a torrent using a magnet link
 func addTorrentHandler(w http.ResponseWriter, r *http.Request) {
 	var request struct{ Magnet string }
@@ -439,6 +483,165 @@ func addTorrentHandler(w http.ResponseWriter, r *http.Request) {
 	if magnet == "" {
 		respondWithJSON(w, http.StatusBadRequest, map[string]string{"error": "No magnet link provided"})
 	}
+
+	settingsMutex.RLock()
+	rdEnabled := currentSettings.EnableRealDebrid
+	rdApiKey := currentSettings.RealDebridApiKey
+	settingsMutex.RUnlock()
+
+	if rdEnabled {
+		if rdApiKey == "" {
+			respondWithJSON(w, http.StatusBadRequest, map[string]string{"error": "Real-Debrid is enabled, but API key is not set."})
+			return
+		}
+
+		// Real-Debrid Logic
+		log.Println("Adding magnet to Real-Debrid...")
+
+		// Step 1: Add magnet to Real-Debrid
+		rdApiUrl := "https://api.real-debrid.com/rest/1.0"
+		client := &http.Client{Timeout: 30 * time.Second}
+
+		addMagnetData := url.Values{}
+		addMagnetData.Set("magnet", magnet)
+
+		req, err := http.NewRequest("POST", rdApiUrl+"/torrents/addMagnet", strings.NewReader(addMagnetData.Encode()))
+		if err != nil {
+			respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create Real-Debrid request"})
+			return
+		}
+
+		req.Header.Add("Authorization", "Bearer "+rdApiKey)
+		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to call Real-Debrid API"})
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusCreated {
+			var errBody map[string]interface{}
+			json.NewDecoder(resp.Body).Decode(&errBody)
+			log.Printf("Real-Debrid API error: %v", errBody)
+			respondWithJSON(w, resp.StatusCode, map[string]string{"error": "Failed to add magnet to Real-Debrid"})
+			return
+		}
+
+		var addMagnetResponse RDAddMagnetResponse
+		if err := json.NewDecoder(resp.Body).Decode(&addMagnetResponse); err != nil {
+			respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to decode Real-Debrid response"})
+			return
+		}
+
+		log.Printf("Magnet added to Real-Debrid with ID: %s", addMagnetResponse.ID)
+
+		// Step 2: Select all files to start the download
+		selectFilesData := url.Values{}
+		selectFilesData.Set("files", "all")
+
+		req, err = http.NewRequest("POST", rdApiUrl+"/torrents/selectFiles/"+addMagnetResponse.ID, strings.NewReader(selectFilesData.Encode()))
+		if err != nil {
+			respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create select files request"})
+			return
+		}
+		req.Header.Add("Authorization", "Bearer "+rdApiKey)
+		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+		resp, err = client.Do(req)
+		if err != nil {
+			respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to call select files API"})
+			return
+		}
+		resp.Body.Close() // We don't need the body, just the status code
+
+		if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusAccepted {
+			log.Printf("Real-Debrid select files API error: status %d", resp.StatusCode)
+			respondWithJSON(w, resp.StatusCode, map[string]string{"error": "Failed to select files on Real-Debrid"})
+			return
+		}
+
+		log.Println("Files selected on Real-Debrid. Polling for completion...")
+
+		// Step 3: Poll for torrent info until downloaded
+		var torrentInfo RDTorrentInfo
+		timeout := time.After(5 * time.Minute) // 5 minute timeout for polling
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-timeout:
+				respondWithJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "Real-Debrid download timed out"})
+				return
+			case <-ticker.C:
+				req, err := http.NewRequest("GET", rdApiUrl+"/torrents/info/"+addMagnetResponse.ID, nil)
+				if err != nil {
+					continue // Log this?
+				}
+				req.Header.Add("Authorization", "Bearer "+rdApiKey)
+
+				resp, err := client.Do(req)
+				if err != nil {
+					continue // Log this?
+				}
+
+				if err := json.NewDecoder(resp.Body).Decode(&torrentInfo); err != nil {
+					resp.Body.Close()
+					continue // Log this?
+				}
+				resp.Body.Close()
+
+				if torrentInfo.Status == "downloaded" {
+					goto SendResponse // Break out of the loop and polling
+				}
+
+				if torrentInfo.Status == "error" || torrentInfo.Status == "magnet_error" || torrentInfo.Status == "virus" {
+					respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Real-Debrid reported an error with the torrent"})
+					return
+				}
+				// Otherwise, continue polling
+			}
+		}
+
+	SendResponse:
+		log.Println("Real-Debrid download complete. Preparing response.")
+
+		// Step 4: Prepare and send the response
+		var videoFiles []FileLinkInfo
+		var subtitleFiles []FileLinkInfo
+
+		// Assuming the order of links corresponds to the order of files
+		if len(torrentInfo.Links) != len(torrentInfo.Files) {
+			respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Mismatch between files and links from Real-Debrid"})
+			return
+		}
+
+		for i, file := range torrentInfo.Files {
+			fileName := filepath.Base(file.Path)
+			linkInfo := FileLinkInfo{
+				Name: fileName,
+				URL:  torrentInfo.Links[i],
+				Size: file.Bytes,
+			}
+			if strings.HasSuffix(strings.ToLower(fileName), ".mp4") || strings.HasSuffix(strings.ToLower(fileName), ".mkv") || strings.HasSuffix(strings.ToLower(fileName), ".webm") || strings.HasSuffix(strings.ToLower(fileName), ".avi") {
+				videoFiles = append(videoFiles, linkInfo)
+			} else if strings.HasSuffix(strings.ToLower(fileName), ".srt") || strings.HasSuffix(strings.ToLower(fileName), ".vtt") || strings.HasSuffix(strings.ToLower(fileName), ".sub") {
+				subtitleFiles = append(subtitleFiles, linkInfo)
+			}
+		}
+
+		finalResponse := FinalResponse{
+			Source:    "realdebrid",
+			Videos:    videoFiles,
+			Subtitles: subtitleFiles,
+		}
+
+		respondWithJSON(w, http.StatusOK, finalResponse)
+		return
+	}
+
 
 	// handle http links like Prowlarr or Jackett
 	if strings.HasPrefix(request.Magnet, "http") {
@@ -1279,10 +1482,10 @@ func saveProxySettingsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settingsMutex.RLock()
+	settingsMutex.Lock()
 	currentSettings.EnableProxy = newSettings.EnableProxy
 	currentSettings.ProxyURL = newSettings.ProxyURL
-	defer settingsMutex.RUnlock()
+	settingsMutex.Unlock()
 
 	if err := saveSettingsToFile(); err != nil {
 		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to save settings: " + err.Error()})
@@ -1313,11 +1516,11 @@ func saveProwlarrSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settingsMutex.RLock()
+	settingsMutex.Lock()
 	currentSettings.EnableProwlarr = newSettings.EnableProwlarr
 	currentSettings.ProwlarrHost = newSettings.ProwlarrHost
 	currentSettings.ProwlarrApiKey = newSettings.ProwlarrApiKey
-	defer settingsMutex.RUnlock()
+	settingsMutex.Unlock()
 
 	if err := saveSettingsToFile(); err != nil {
 		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to save settings: " + err.Error()})
@@ -1345,11 +1548,11 @@ func saveJackettSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settingsMutex.RLock()
+	settingsMutex.Lock()
 	currentSettings.EnableJackett = newSettings.EnableJackett
 	currentSettings.JackettHost = newSettings.JackettHost
 	currentSettings.JackettApiKey = newSettings.JackettApiKey
-	defer settingsMutex.RUnlock()
+	settingsMutex.Unlock()
 
 	if err := saveSettingsToFile(); err != nil {
 		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to save settings: " + err.Error()})
@@ -1357,6 +1560,37 @@ func saveJackettSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusOK, map[string]string{"message": "Jackett settings saved successfully"})
+}
+
+// Jackett Settings Save Handler
+func saveRealDebridSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-control-Allow-Headers", "Content-Type")
+	if r.Method == "OPTIONS" {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var newSettings RealDebridSettings
+	if err := json.NewDecoder(r.Body).Decode(&newSettings); err != nil {
+		respondWithJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	settingsMutex.Lock()
+	currentSettings.EnableRealDebrid = newSettings.EnableRealDebrid
+	currentSettings.RealDebridApiKey = newSettings.RealDebridApiKey
+	settingsMutex.Unlock()
+
+	if err := saveSettingsToFile(); err != nil {
+		respondWithJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to save settings: " + err.Error()})
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]string{"message": "Real-Debrid settings saved successfully"})
 }
 
 // Convert Torrent to Magnet Handler
